@@ -1,0 +1,53 @@
+from kubernetes import client, config
+from openshift.dynamic import DynamicClient
+import yaml
+
+class OpenShiftVMManager:
+    def __init__(self, kubeconfig_path="~/.kube/config"):
+        config.load_kube_config(config_file=kubeconfig_path)
+        k8s_client = client.ApiClient()
+        self.dyn_client = DynamicClient(k8s_client)
+        self.namespace = "default"  # NameSpaceDefinition
+        self.vms = self.dyn_client.resources.get(api_version='kubevirt.io/v1', kind='VirtualMachine')
+
+    def create_vm(self, vm_manifest_path):
+        with open(vm_manifest_path, 'r') as f:
+            vm_def = yaml.safe_load(f)
+        created_vm = self.vms.create(body=vm_def, namespace=self.namespace)
+        print(f"Created VM: {created_vm.metadata.name}")
+        return created_vm
+
+    def list_vms(self):
+        vm_list = self.vms.get(namespace=self.namespace)
+        return [vm.metadata.name for vm in vm_list.items]
+
+    def delete_vm(self, name):
+        self.vms.delete(name=name, namespace=self.namespace)
+        print(f"Deleted VM: {name}")
+
+    def pause_vm(self, name):
+        subres = self.dyn_client.resources.get(api_version="subresources.kubevirt.io/v1", kind="VirtualMachine")
+        subres.patch(name=name, namespace=self.namespace, body={"spec": {"paused": True}})
+        print(f"Paused VM: {name}")
+
+    def resume_vm(self, name):
+        subres = self.dyn_client.resources.get(api_version="subresources.kubevirt.io/v1", kind="VirtualMachine")
+        subres.patch(name=name, namespace=self.namespace, body={"spec": {"paused": False}})
+        print(f"Resumed VM: {name}")
+
+    def start_vm(self, name):
+        vm_instance = self.vms.get(name=name, namespace=self.namespace)
+        if not vm_instance.spec.running:
+            self.vms.patch(name=name, namespace=self.namespace, body={"spec": {"running": True}})
+            print(f"Started VM: {name}")
+        else:
+            print(f"VM {name} is already running.")
+
+    def restart_vm(self, name):
+        self.vms.patch(name=name, namespace=self.namespace, content_type='application/merge-patch+json',
+                       body={"spec": {"running": False}})
+        print(f"Stopping VM: {name}")
+        import time; time.sleep(5)  # Allow VM to stop
+        self.vms.patch(name=name, namespace=self.namespace, content_type='application/merge-patch+json',
+                       body={"spec": {"running": True}})
+        print(f"Restarted VM: {name}")
