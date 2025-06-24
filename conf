@@ -128,3 +128,57 @@ spec:
               password: secret
               chpasswd: { expire: False }
 
+===================================================================================================================
+
+#############Basic VM YAML with Embedded Cloud-Init
+
+Pass specifications like username, password, packages, scripts, and hostname into a KubeVirt VM using cloudInitNoCloud.
+
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: demo-vm
+  namespace: vms
+spec:
+  running: false
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: demo-vm
+    spec:
+      domain:
+        cpu:
+          cores: 2
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+        resources:
+          requests:
+            memory: 4Gi
+      volumes:
+        - name: rootdisk
+          containerDisk:
+            image: kubevirt/fedora-cloud-container-disk-demo:latest
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              hostname: demo-vm
+              users:
+                - name: cloud-user
+                  sudo: ALL=(ALL) NOPASSWD:ALL
+                  groups: users, admin
+                  shell: /bin/bash
+                  lock_passwd: false
+                  passwd: $6$rounds=4096$DUMMY$IVR92ZnN2dA6H4vhCIKY7ghNk5yGECs9NwdyW7bFHe/4
+              packages:
+                - git
+                - curl
+              runcmd:
+                - echo "Welcome to the VM!" > /etc/motd
+                - systemctl restart sshd
