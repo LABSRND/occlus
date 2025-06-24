@@ -1,0 +1,130 @@
+######1. Sample JSON Webform Input
+
+Assume a webform sends a JSON like this:
+
+{
+  "name": "test-vm",
+  "namespace": "vm-project",
+  "cpu": 2,
+  "memory": "4Gi",
+  "disk_size": "20Gi",
+  "container_disk_image": "kubevirt/fedora-cloud-container-disk-demo:latest",
+  "cloud_user": "cloud-user",
+  "cloud_password": "secret"
+}
+
+
+######2. Python Code to Convert JSON to KubeVirt VirtualMachine YAML
+import yaml
+
+def generate_vm_yaml(data):
+    vm_manifest = {
+        "apiVersion": "kubevirt.io/v1",
+        "kind": "VirtualMachine",
+        "metadata": {
+            "name": data["name"],
+            "namespace": data["namespace"]
+        },
+        "spec": {
+            "running": False,
+            "template": {
+                "metadata": {
+                    "labels": {
+                        "kubevirt.io/domain": data["name"]
+                    }
+                },
+                "spec": {
+                    "domain": {
+                        "cpu": {
+                            "cores": data["cpu"]
+                        },
+                        "devices": {
+                            "disks": [
+                                {
+                                    "name": "rootdisk",
+                                    "disk": {
+                                        "bus": "virtio"
+                                    }
+                                },
+                                {
+                                    "name": "cloudinitdisk",
+                                    "disk": {
+                                        "bus": "virtio"
+                                    }
+                                }
+                            ]
+                        },
+                        "resources": {
+                            "requests": {
+                                "memory": data["memory"]
+                            }
+                        }
+                    },
+                    "volumes": [
+                        {
+                            "name": "rootdisk",
+                            "containerDisk": {
+                                "image": data["container_disk_image"]
+                            }
+                        },
+                        {
+                            "name": "cloudinitdisk",
+                            "cloudInitNoCloud": {
+                                "userData": f"""#cloud-config
+hostname: {data["name"]}
+user: {data["cloud_user"]}
+password: {data["cloud_password"]}
+chpasswd: {{ expire: False }}
+"""
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    return yaml.dump(vm_manifest, sort_keys=False)
+
+===================================================================================
+########3. Output YAML Example
+
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: test-vm
+  namespace: vm-project
+spec:
+  running: false
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: test-vm
+    spec:
+      domain:
+        cpu:
+          cores: 2
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+        resources:
+          requests:
+            memory: 4Gi
+      volumes:
+        - name: rootdisk
+          containerDisk:
+            image: kubevirt/fedora-cloud-container-disk-demo:latest
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |-
+              #cloud-config
+              hostname: test-vm
+              user: cloud-user
+              password: secret
+              chpasswd: { expire: False }
+
