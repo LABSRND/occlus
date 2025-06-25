@@ -1,0 +1,194 @@
+###########################Add Authentication to protect the form and Admin view to browse submitted entries in the DB######################################
+
+# app.py
+from flask import Flask, request, render_template, redirect, url_for, session, flash
+import yaml
+import json
+import mysql.connector
+from mysql.connector import Error
+from jsonschema import validate, ValidationError
+from functools import wraps
+
+app = Flask(__name__)
+app.secret_key = 'replace_with_a_strong_secret_key'  # Required for session-based auth
+
+# Define a schema to validate incoming JSON
+json_schema = {
+    "type": "object",
+    "required": ["name", "namespace", "cpu", "memory", "container_disk_image", "cloud_user", "cloud_password"],
+    "properties": {
+        "name": {"type": "string"},
+        "namespace": {"type": "string"},
+        "cpu": {"type": "integer", "minimum": 1},
+        "memory": {"type": "string"},
+        "container_disk_image": {"type": "string"},
+        "cloud_user": {"type": "string"},
+        "cloud_password": {"type": "string"}
+    }
+}
+
+# Hardcoded admin credentials (replace with secure storage or database in production)
+ADMIN_USERNAME = 'admin'
+ADMIN_PASSWORD = 'admin123'
+
+# Decorator for protected routes
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'logged_in' not in session:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Database connection setup
+def get_db_connection():
+    return mysql.connector.connect(
+        host='localhost',         # Update with your DB host
+        user='root',              # Update with your DB user
+        password='password',      # Update with your DB password
+        database='vm_configs'     # Update with your DB name
+    )
+
+# Home route renders the input form
+@app.route("/")
+@login_required
+def index():
+    return render_template("index.html")
+
+# Login route
+@app.route("/login", methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+            session['logged_in'] = True
+            return redirect(url_for('index'))
+        else:
+            flash('Invalid credentials', 'danger')
+    return render_template('login.html')
+
+# Logout route
+@app.route("/logout")
+@login_required
+def logout():
+    session.pop('logged_in', None)
+    return redirect(url_for('login'))
+
+# Handle form submission and YAML generation
+@app.route("/generate", methods=["POST"])
+@login_required
+def generate():
+    try:
+        user_input = request.form["json"]
+        data = json.loads(user_input)
+        validate(instance=data, schema=json_schema)
+
+        vm_yaml = {
+            "apiVersion": "kubevirt.io/v1",
+            "kind": "VirtualMachine",
+            "metadata": {
+                "name": data["name"],
+                "namespace": data["namespace"]
+            },
+            "spec": {
+                "running": False,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "kubevirt.io/domain": data["name"]
+                        }
+                    },
+                    "spec": {
+                        "domain": {
+                            "cpu": {"cores": data["cpu"]},
+                            "devices": {
+                                "disks": [
+                                    {"name": "rootdisk", "disk": {"bus": "virtio"}},
+                                    {"name": "cloudinitdisk", "disk": {"bus": "virtio"}}
+                                ]
+                            },
+                            "resources": {"requests": {"memory": data["memory"]}}
+                        },
+                        "volumes": [
+                            {
+                                "name": "rootdisk",
+                                "containerDisk": {
+                                    "image": data["container_disk_image"]
+                                }
+                            },
+                            {
+                                "name": "cloudinitdisk",
+                                "cloudInitNoCloud": {
+                                    "userData": f"""#cloud-config\nhostname: {data['name']}\nusers:\n  - name: {data['cloud_user']}\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: users, admin\n    shell: /bin/bash\n    lock_passwd: false\n    passwd: {data['cloud_password']}\nruncmd:\n  - echo \"Provisioned by webform\" > /etc/motd\n"""
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+
+        yaml_output = yaml.dump(vm_yaml, sort_keys=False)
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO vm_data (input_json, output_yaml) VALUES (%s, %s)", (user_input, yaml_output))
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return render_template("result.html", yaml_output=yaml_output)
+
+    except ValidationError as ve:
+        return f"Input validation error: {ve.message}", 400
+    except Error as e:
+        return f"Database error: {e}", 500
+    except Exception as ex:
+        return f"Error: {ex}", 500
+
+# Admin view to browse all submitted entries
+@app.route("/admin")
+@login_required
+def admin():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT id, input_json, output_yaml, created_at FROM vm_data ORDER BY created_at DESC")
+        records = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return render_template("admin.html", entries=records)
+    except Error as e:
+        return f"Database error: {e}", 500
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
+
+################
+Required Templates
+Here are the extra templates you'll need to add:
+
+<h2>Login</h2>
+<form method="post">
+  <input name="username" placeholder="Username" required><br>
+  <input name="password" type="password" placeholder="Password" required><br>
+  <button type="submit">Login</button>
+</form>
+
+=============================================================================================
+
+templates/admin.html
+<h2>Admin View: Submitted VM Configs</h2>
+<table border="1">
+  <tr><th>ID</th><th>Created</th><th>Input JSON</th><th>Output YAML</th></tr>
+  {% for entry in entries %}
+  <tr>
+    <td>{{ entry.id }}</td>
+    <td>{{ entry.created_at }}</td>
+    <td><pre>{{ entry.input_json }}</pre></td>
+    <td><pre>{{ entry.output_yaml }}</pre></td>
+  </tr>
+  {% endfor %}
+</table>
