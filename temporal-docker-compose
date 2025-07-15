@@ -1,0 +1,114 @@
+📦 Final Structure (Mono Repo)
+
+kubevirt_vm_portal/
+├── docker-compose.yml
+├── app/
+│   ├── Dockerfile
+│   ├── app.py
+│   ├── workflows.py
+│   ├── workers.py
+│   ├── templates/
+│   │   └── form.html
+│   └── repo/  # git repo directory (mounted volume)
+├── temporal/
+│   └── docker-compose.yml  # standard Temporal stack
+
+=================================================================================================
+🐳 1. Root docker-compose.yml
+
+version: '3.8'
+
+services:
+  flask:
+    build: ./app
+    container_name: flask_webform
+    ports:
+      - "5000:5000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - worker
+    volumes:
+      - ./app/repo:/app/repo
+    networks:
+      - kubevirt-net
+
+  worker:
+    build: ./app
+    container_name: vm_worker
+    command: ["python", "workers.py"]
+    depends_on:
+      - temporal
+    volumes:
+      - ./app/repo:/app/repo
+    networks:
+      - kubevirt-net
+
+  temporal:
+    container_name: temporal
+    build:
+      context: ./temporal
+    restart: always
+    networks:
+      - kubevirt-net
+    ports:
+      - "7233:7233"
+
+=================================================================================================
+
+
+🐳 2. Flask/Worker Dockerfile (app/Dockerfile)
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY . .
+
+RUN apt-get update && apt-get install -y git \
+    && pip install --no-cache-dir flask temporalio pyyaml gitpython
+
+CMD ["python", "app.py"]
+
+=================================================================================================
+🔄 3. Temporal Docker Compose (temporal/docker-compose.yml)
+
+Download from Temporal official repo:
+
+curl -o temporal/docker-compose.yml https://raw.githubusercontent.com/temporalio/docker-compose/main/docker-compose.yml
+Then modify:
+
+In your main docker-compose.yml, you do not need to launch all the Temporal UI/services—just use the temporal service with temporal server start-dev command in a Dockerfile:
+temporal/Dockerfile
+FROM temporalio/auto-setup:1.23.0
+
+CMD ["temporal", "server", "start-dev"]
+
+=================================================================================================
+🧪 4. Quick Git Repo Init (app/repo)
+
+Make sure the folder exists and is initialized:
+
+mkdir -p app/repo
+cd app/repo
+git init
+git remote add origin https://<token>@github.com/<your_user>/<your_repo>.git
+touch .gitkeep
+Set up your token or SSH authentication as needed. You can mount SSH keys into the container if using SSH.
+
+=================================================================================================
+
+▶️ 5. Run Everything
+
+docker-compose up --build
+🌐 Access
+
+Web form: http://localhost:5000
+JSON gets submitted to Temporal workflow.
+YAML saved and pushed to Git.
+Would you like:
+
+A sample KubeVirt JSON spec?
+CI/CD pipeline to auto-publish YAMLs?
+Helm chart for this entire app?
+Let me know!
