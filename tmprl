@@ -1,0 +1,173 @@
+To achieve your request using Temporal and Python, we'll create a system that:
+
+Hosts a web form that accepts user input in JSON format for a KubeVirt VirtualMachine spec.
+Converts that JSON into YAML.
+Saves it locally and checks it into a Git repository.
+Uses Temporal workflows to orchestrate this process in a fault-tolerant, stateful way.
+
+
+
+[User Web Form] ──> [Flask API] ──> [Temporal Workflow]
+                                  ├──> Convert JSON to YAML
+                                  ├──> Save file to disk
+                                  └──> Git commit & push
+1. Prerequisites
+
+Python 3.10+
+Temporal server running (via Temporal CLI or docker-compose)
+Git repo initialized (public/private with SSH key or token configured)
+Install dependencies:
+
+pip install flask pyyaml temporalio gitpython
+========================================================================================================
+
+ 2. Project Structure
+
+kubevirt_form/
+├── app.py                    # Flask frontend
+├── workflows.py              # Temporal workflow definitions
+├── workers.py                # Worker registration
+├── repo/                     # Local Git working copy
+├── templates/form.html       # HTML template for input
+
+========================================================================================================
+
+3. Temporal Workflow (workflows.py)
+
+from temporalio import workflow, activity
+from dataclasses import dataclass
+from datetime import timedelta
+
+@dataclass
+class VMRequest:
+    json_data: dict
+    filename: str
+
+@workflow.defn
+class VMProvisionWorkflow:
+    @workflow.run
+    async def run(self, req: VMRequest) -> str:
+        yaml_file = await workflow.execute_activity(
+            convert_to_yaml,
+            req,
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        await workflow.execute_activity(
+            commit_to_git,
+            yaml_file,
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        return f"Provisioned and committed {yaml_file}"
+========================================================================================================
+
+4. Activities (workflows.py continued)
+
+import os
+import yaml
+from git import Repo
+
+@activity.defn
+def convert_to_yaml(req: VMRequest) -> str:
+    path = f"./repo/{req.filename}.yaml"
+    with open(path, "w") as f:
+        yaml.dump(req.json_data, f)
+    return path
+
+@activity.defn
+def commit_to_git(filepath: str):
+    repo = Repo("./repo")
+    repo.git.add(filepath)
+    repo.index.commit(f"Add new VM spec: {os.path.basename(filepath)}")
+    origin = repo.remote(name="origin")
+    origin.push()
+
+========================================================================================================
+
+5. Flask Web Form
+from flask import Flask, request, render_template
+from temporalio.client import Client
+from workflows import VMProvisionWorkflow, VMRequest
+import json
+import uuid
+import asyncio
+
+app = Flask(__name__)
+
+@app.route("/", methods=["GET", "POST"])
+def form():
+    if request.method == "POST":
+        json_text = request.form.get("json_data")
+        try:
+            data = json.loads(json_text)
+            filename = f"vm_{uuid.uuid4().hex[:8]}"
+            asyncio.run(start_workflow(data, filename))
+            return f"Submitted VM spec. Stored as {filename}.yaml"
+        except Exception as e:
+            return f"Invalid JSON: {str(e)}"
+    return render_template("form.html")
+
+async def start_workflow(data, filename):
+    client = await Client.connect("localhost:7233")
+    await client.start_workflow(
+        VMProvisionWorkflow.run,
+        VMRequest(data, filename),
+        id=f"vm-workflow-{filename}",
+        task_queue="vm-tasks",
+    )
+
+if __name__ == "__main__":
+    app.run(debug=True)
+========================================================================================================
+
+6. Worker Runner (workers.py)
+import asyncio
+from temporalio.worker import Worker
+from workflows import VMProvisionWorkflow, convert_to_yaml, commit_to_git
+
+async def main():
+    client = await Client.connect("localhost:7233")
+    worker = Worker(
+        client,
+        task_queue="vm-tasks",
+        workflows=[VMProvisionWorkflow],
+        activities=[convert_to_yaml, commit_to_git],
+    )
+    await worker.run()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+========================================================================================================
+
+7. Web Template (templates/form.html)
+
+<!DOCTYPE html>
+<html>
+<head><title>KubeVirt VM Form</title></head>
+<body>
+<h2>Submit KubeVirt VM Spec (JSON)</h2>
+<form method="POST">
+<textarea name="json_data" rows="20" cols="80"></textarea><br>
+<input type="submit" value="Submit">
+</form>
+</body>
+</html>
+
+========================================================================================================
+
+8. Git Setup
+cd kubevirt_form/repo
+git init
+git remote add origin git@github.com:<your_user>/<your_repo>.git
+# OR use https with token
+# git remote add origin https://<token>@github.com/<your_user>/<repo>.git
+
+Running the System
+
+Start Temporal server:
+docker-compose -f https://github.com/temporalio/docker-compose/blob/main/docker-compose.yml up
+Start the worker:
+python workers.py
+Run the Flask app:
+python app.py
+Visit http://localhost:5000 and submit a JSON VM spec.
